@@ -1,0 +1,90 @@
+name: Build ipk
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [ published ]
+
+env:
+  # ImmortalWrt mediatek/filogic SDK (aarch64_cortex-a53), matches
+  # chasey-dev/immortalwrt-mt798x-rebase target & libc (musl). Used purely
+  # as the compile farm to produce the .ipk.
+  SDK_VER: 25.12.2
+  SDK_TARGET: mediatek/filogic
+  SDK_NAME: immortalwrt-sdk-25.12.2-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout package source
+        uses: actions/checkout@v4
+
+      - name: Download ImmortalWrt SDK
+        run: |
+          set -e
+          cd /tmp
+          # Try the pinned version first, then fall back to latest release dir listing
+          URL="https://downloads.immortalwrt.org/releases/${SDK_VER}/targets/${SDK_TARGET}/${SDK_NAME}.tar.zst"
+          if ! curl -fsSL "$URL" -o sdk.tar.zst; then
+            echo "Pinned SDK not found, resolving from downloads.immortalwrt.org ..."
+            IDX=$(curl -fsSL "https://downloads.immortalwrt.org/releases/${SDK_VER}/targets/${SDK_TARGET}/")
+            F=$(echo "$IDX" | grep -oE 'immortalwrt-sdk-[^"]*mediatek-filogic[^"]*Linux-x86_64\.tar\.zst' | head -1)
+            [ -n "$F" ] || { echo "no sdk tarball found"; exit 1; }
+            curl -fsSL "https://downloads.immortalwrt.org/releases/${SDK_VER}/targets/${SDK_TARGET}/${F}" -o sdk.tar.zst
+          fi
+          tar -I zstd -xf sdk.tar.zst
+          mv ${SDK_NAME} sdk 2>/dev/null || mv immortalwrt-sdk-* sdk
+          ls sdk/
+
+      - name: Install package into SDK
+        run: |
+          set -e
+          cd /tmp/sdk
+          mkdir -p package/luci-app-traffic-survey
+          cp -r "$GITHUB_WORKSPACE/." package/luci-app-traffic-survey/
+          # ensure feeds are usable (some SDKs need a packages feed for luci-base dep resolution)
+          ./scripts/feeds update -a >/dev/null 2>&1 || true
+          ./scripts/feeds install -a >/dev/null 2>&1 || true
+
+      - name: Configure SDK
+        run: |
+          cd /tmp/sdk
+          cat > .config <<'EOF'
+          CONFIG_ALL_NONSHARED=n
+          CONFIG_ALL_KMODS=n
+          CONFIG_ALL=n
+          CONFIG_AUTOREMOVE=n
+          CONFIG_SIGNED_PACKAGES=n
+          CONFIG_PACKAGE_luci-app-traffic-survey=m
+          EOF
+          make defconfig >/dev/null 2>&1
+          grep traffic-survey .config || true
+
+      - name: Build package
+        run: |
+          cd /tmp/sdk
+          make package/luci-app-traffic-survey/compile V=s -j"$(nproc)"
+
+      - name: Collect ipk
+        run: |
+          cd /tmp/sdk
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          find bin/packages -name 'luci-app-traffic-survey*.ipk' -exec cp -v {} "$GITHUB_WORKSPACE/dist/" \;
+          ls -la "$GITHUB_WORKSPACE/dist"
+
+      - name: Upload ipk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-traffic-survey-ipk
+          path: dist/*.ipk
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.ipk

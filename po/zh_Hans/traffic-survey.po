@@ -1,0 +1,55 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: luci-app-traffic-survey 1.0.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-22 00:00+0000\n"
+"PO-Revision-Date: 2026-09-22 00:00+0800\n"
+"Last-Translator: \n"
+"Language-Team: \n"
+"Language: zh_Hans\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+msgid "Online Hosts"
+msgstr "在线主机"
+
+msgid "Online"
+msgstr "在线"
+
+msgid "Offline"
+msgstr "离线"
+
+msgid "Hostname"
+msgstr "主机名"
+
+msgid "IPv4 address"
+msgstr "IPv4 地址"
+
+msgid "IPv6 addresses"
+msgstr "IPv6 地址"
+
+msgid "MAC address"
+msgstr "MAC 地址"
+
+msgid "Upload"
+msgstr "上传"
+
+msgid "Download"
+msgstr "下载"
+
+msgid "Total traffic"
+msgstr "总流量"
+
+msgid "Static Lease"
+msgstr "静态租约"
+
+msgid "Reserve IP"
+msgstr "设为静态"
+
+msgid "Reserve a specific IP address for this device"
+msgstr "为此设备保留固定 IP 地址"
+
+msgid "No active leases found"
+msgstr "未发现活动租约"

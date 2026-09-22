@@ -1,0 +1,18 @@
+{
+	"luci-app-traffic-survey": {
+		"description": "Read access to per-host traffic survey",
+		"read": {
+			"ubus": {
+				"luci.client-rates": [ "get" ],
+				"luci-rpc": [ "getDHCPLeases" ],
+				"network.rrdns": [ "lookup" ]
+			},
+			"file": {
+				"/proc/net/arp": [ "read" ],
+				"/proc/net/nf_conntrack": [ "read" ],
+				"/proc/sys/net/netfilter/nf_conntrack_acct": [ "read" ],
+				"/tmp/luci-client-rates/*": [ "read" ]
+			}
+		}
+	}
+}

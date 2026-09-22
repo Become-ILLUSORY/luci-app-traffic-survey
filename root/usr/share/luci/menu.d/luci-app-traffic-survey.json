@@ -1,0 +1,12 @@
+{
+	"admin/status/overview": {
+		"title": "Overview",
+		"action": {
+			"type": "view",
+			"path": "status/index"
+		},
+		"depends": {
+			"acl": [ "luci-app-traffic-survey" ]
+		}
+	}
+}

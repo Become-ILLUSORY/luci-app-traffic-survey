@@ -1,0 +1,8 @@
+#!/bin/sh
+# First-boot defaults for luci-app-traffic-survey
+uci -q get traffic_survey.main >/dev/null || {
+	uci set traffic_survey.main=main
+	uci set traffic_survey.main.enabled='1'
+	uci commit traffic_survey
+}
+exit 0
