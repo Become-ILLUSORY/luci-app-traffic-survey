@@ -10,7 +10,7 @@
  * nf_conntrack' is enabled (hnat_setting 7 1), which the companion init
  * script does at boot. So offloaded flows are fully accounted.
  *
- * Protocol (QWRT-compatible):
+ * Protocol:
  *   ubus call luci.client-rates get '{"addresses":["192.168.0.10",...]}'
  *   -> {"rates":{"<ip>":{"upload":Bps,"download":Bps,"mac":"..","ready":1}},
  *       "totals":{"<MAC>":bytes},
@@ -32,6 +32,10 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/select.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <pthread.h>
 #include <linux/netlink.h>
 
 #include <libubus.h>
@@ -320,6 +324,9 @@ static bool mac_for_ip(const char *ip, char *mac, size_t mlen)
 /* ------------------------------------------------------------------ */
 /* periodic sampler: rotate window, accumulate totals                  */
 
+#define PROBE_MAX_HOSTS  256
+static void probe_submit(const char *ips[], int n);
+
 static void sample_cb(struct uloop_timeout *t)
 {
 	uint64_t t0 = now_ms();
@@ -347,6 +354,20 @@ static void sample_cb(struct uloop_timeout *t)
 			}
 		}
 
+		/* feed online IPs to the web-port prober */
+		{
+			static const char *ips[PROBE_MAX_HOSTS];
+			static char buf[PROBE_MAX_HOSTS][64];
+			int n = 0;
+			for (int i = 0; i < (1 << HASH_BITS) && n < PROBE_MAX_HOSTS; i++)
+				for (struct ipacct *c = cur[i]; c && n < PROBE_MAX_HOSTS; c = c->next) {
+					if (c->family != AF_INET) continue; /* probe v4 web UIs only */
+					ip_to_str(c->family, c->addr, buf[n], sizeof(buf[n]));
+					ips[n] = buf[n]; n++;
+				}
+			if (n) probe_submit(ips, n);
+		}
+
 		/* rotate */
 		memcpy(prev, cur, sizeof(cur));
 		memset(cur, 0, sizeof(cur));
@@ -356,6 +377,134 @@ static void sample_cb(struct uloop_timeout *t)
 	last_ms = t0;
 	totals_save();
 	uloop_timeout_set(t, INTERVAL_MS);
+}
+
+/* ------------------------------------------------------------------ */
+/* web port prober: background thread scans common web mgmt ports and   */
+/* records which hosts expose a web UI, so the frontend can render a    */
+/* clickable link. Non-blocking connect, small concurrency.             */
+
+#define PROBE_TIMEOUT_MS 600
+
+static const uint16_t probe_ports[] = { 80, 443, 8080, 8443, 81, 8000, 5000, 9000, 5666, 5667 };
+#define N_PROBE_PORTS (sizeof(probe_ports)/sizeof(probe_ports[0]))
+
+struct probe_result {
+	char     ip[64];
+	uint16_t port;        /* first open web port found, 0 = none */
+	uint64_t ts;          /* when probed */
+};
+
+static struct probe_result probe_table[PROBE_MAX_HOSTS];
+static int    probe_n = 0;
+static pthread_mutex_t probe_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* pending scan queue fed by sampler */
+static char probe_queue[PROBE_MAX_HOSTS][64];
+static int  probe_qn = 0;
+static bool probe_dirty = false;
+
+static void probe_submit(const char *ips[], int n)
+{
+	pthread_mutex_lock(&probe_lock);
+	probe_qn = n > PROBE_MAX_HOSTS ? PROBE_MAX_HOSTS : n;
+	for (int i = 0; i < probe_qn; i++)
+		snprintf(probe_queue[i], sizeof(probe_queue[i]), "%s", ips[i]);
+	probe_dirty = true;
+	pthread_mutex_unlock(&probe_lock);
+}
+
+/* probe one ip:port with a short non-blocking connect */
+static bool port_open(const char *ip, uint16_t port)
+{
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0) return false;
+
+	struct sockaddr_in sa = {0};
+	sa.sin_family = AF_INET;
+	sa.sin_port = htons(port);
+	if (inet_pton(AF_INET, ip, &sa.sin_addr) != 1) { close(fd); return false; }
+
+	int fl = fcntl(fd, F_GETFL, 0);
+	fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+
+	int r = connect(fd, (struct sockaddr *)&sa, sizeof(sa));
+	if (r < 0 && errno != EINPROGRESS) { close(fd); return false; }
+
+	if (r < 0) {
+		fd_set wf; FD_ZERO(&wf); FD_SET(fd, &wf);
+		struct timeval tv = { .tv_sec = 0, .tv_usec = PROBE_TIMEOUT_MS * 1000 };
+		if (select(fd + 1, NULL, &wf, NULL, &tv) <= 0) { close(fd); return false; }
+		int err = 0; socklen_t l = sizeof(err);
+		getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &l);
+		if (err) { close(fd); return false; }
+	}
+	close(fd);
+	return true;
+}
+
+static void *probe_thread(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		pthread_mutex_lock(&probe_lock);
+		bool work = probe_dirty;
+		char local[PROBE_MAX_HOSTS][64];
+		int n = probe_qn;
+		if (work) {
+			for (int i = 0; i < n; i++)
+				snprintf(local[i], sizeof(local[i]), "%s", probe_queue[i]);
+			probe_dirty = false;
+		}
+		pthread_mutex_unlock(&probe_lock);
+
+		if (work && n > 0) {
+			for (int i = 0; i < n; i++) {
+				uint16_t found = 0;
+				/* skip if probed recently (within 5 min) */
+				uint64_t now = now_ms();
+				bool fresh = false;
+				pthread_mutex_lock(&probe_lock);
+				for (int j = 0; j < probe_n; j++)
+					if (!strcmp(probe_table[j].ip, local[i]) &&
+					    now - probe_table[j].ts < 300000) {
+						fresh = true; break;
+					}
+				pthread_mutex_unlock(&probe_lock);
+				if (fresh) continue;
+
+				for (size_t p = 0; p < N_PROBE_PORTS && !found; p++)
+					if (port_open(local[i], probe_ports[p]))
+						found = probe_ports[p];
+
+				pthread_mutex_lock(&probe_lock);
+				int slot = -1;
+				for (int j = 0; j < probe_n; j++)
+					if (!strcmp(probe_table[j].ip, local[i])) { slot = j; break; }
+				if (slot < 0 && probe_n < PROBE_MAX_HOSTS)
+					slot = probe_n++;
+				if (slot >= 0) {
+					snprintf(probe_table[slot].ip, sizeof(probe_table[slot].ip), "%s", local[i]);
+					probe_table[slot].port = found;
+					probe_table[slot].ts = now;
+				}
+				pthread_mutex_unlock(&probe_lock);
+			}
+		}
+		usleep(500000); /* 0.5s idle */
+	}
+	return NULL;
+}
+
+/* look up probed web port for an ip (0 = none) */
+static uint16_t probe_web_port(const char *ip)
+{
+	uint16_t port = 0;
+	pthread_mutex_lock(&probe_lock);
+	for (int j = 0; j < probe_n; j++)
+		if (!strcmp(probe_table[j].ip, ip)) { port = probe_table[j].port; break; }
+	pthread_mutex_unlock(&probe_lock);
+	return port;
 }
 
 /* ------------------------------------------------------------------ */
@@ -419,6 +568,7 @@ static int ubus_get(struct ubus_context *ctx, struct ubus_object *obj,
 			blobmsg_add_u64(&b, "download", down);
 			blobmsg_add_string(&b, "mac", mac);
 			blobmsg_add_u8(&b, "ready", 1);
+			blobmsg_add_u32(&b, "web_port", probe_web_port(ips));
 			blobmsg_close_table(&b, r);
 		}
 	}
@@ -471,6 +621,11 @@ int main(int argc, char **argv)
 		fprintf(stderr, "ubus add object failed\n");
 		return 1;
 	}
+
+	/* web port prober thread */
+	pthread_t pt;
+	pthread_create(&pt, NULL, probe_thread, NULL);
+	pthread_detach(pt);
 
 	/* first sample immediately, then periodically */
 	sampler.cb = sample_cb;

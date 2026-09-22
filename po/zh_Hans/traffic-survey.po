@@ -33,6 +33,15 @@ msgstr "IPv6 地址"
 msgid "MAC address"
 msgstr "MAC 地址"
 
+msgid "Vendor"
+msgstr "厂商"
+
+msgid "Open device web UI"
+msgstr "打开设备管理页面"
+
+msgid "Random/locally-administered MAC"
+msgstr "随机/本地管理的 MAC 地址"
+
 msgid "Upload"
 msgstr "上传"
 

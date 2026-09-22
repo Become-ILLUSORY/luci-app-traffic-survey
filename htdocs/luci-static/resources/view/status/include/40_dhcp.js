@@ -16,8 +16,8 @@
  *                 MTK HNAT hw offload the kernel feeds PPE counters back,
  *                 so rates stay accurate with hardware acceleration on)
  *
- * Adapted from QWRT's status include; QWRT-only dependencies (oui database,
- * fingerprint, client-web port probing) removed to keep it self-contained.
+ * Self-contained: host list from DHCP leases + ARP table, rates from the
+ * luci.client-rates ubus backend (conntrack accounting).
  */
 
 const callLuciDHCPLeases = rpc.declare({
@@ -30,6 +30,12 @@ const callClientRates = rpc.declare({
 	object: 'luci.client-rates',
 	method: 'get',
 	params: [ 'addresses' ],
+	expect: { '': {} }
+});
+
+const callDeviceMeta = rpc.declare({
+	object: 'traffic-survey-meta',
+	method: 'get',
 	expect: { '': {} }
 });
 
@@ -74,11 +80,20 @@ return baseclass.extend({
 		let total = 0;
 		for (const ip of addresses) {
 			const rate = data?.rates?.[ip];
+			if (rate?.web_port)
+				this.rateWeb[ip] = rate.web_port;
 			if (!rate?.ready || (mac && rate.mac && rate.mac != mac.toUpperCase()))
 				return [ -1, '-' ];
 			total += Number(rate[direction] || 0);
 		}
 		return addresses.length ? [ total, '%1024.1mB/s'.format(total) ] : [ -1, '-' ];
+	},
+
+	webPortFor(addresses) {
+		for (const ip of addresses || [])
+			if (this.rateWeb && this.rateWeb[ip])
+				return { ip: ip, port: this.rateWeb[ip] };
+		return null;
 	},
 
 	rateCell(lease, hints, direction) {
@@ -169,9 +184,33 @@ return baseclass.extend({
 			this.ratePoll = L.bind(this.refreshRates, this);
 			poll.add(this.ratePoll, 2);
 		}
+		this.lazyLoadMeta();
 		if (L.hasSystemFeature('dnsmasq') || L.hasSystemFeature('odhcpd'))
 			return this.renderLeases(dhcp_leases, host_hints, arp);
 		return null;
+	},
+
+	/* Fetch vendor/type per MAC in the background (api.macvendors.com via the
+	 * meta backend, cached on-device) and fill the already-rendered cells.
+	 * Runs once; never blocks the table. */
+	lazyLoadMeta() {
+		if (this.metaLoaded)
+			return;
+		this.metaLoaded = true;
+		L.resolveDefault(callDeviceMeta(), {}).then(L.bind(function(meta) {
+			this.deviceMeta = (meta && meta.devices) || {};
+			document.querySelectorAll('.luci-client-vendor').forEach(L.bind(function(span) {
+				const mac = span.getAttribute('data-mac');
+				if (!mac) { span.textContent = '-'; return; }
+				const d = this.deviceMeta[mac] || this.deviceMeta[mac.toLowerCase()];
+				if (!d) { span.textContent = '-'; return; }
+				let txt = d.vendor || '';
+				if (d.type && txt) txt += ' · ' + d.type;
+				else if (d.type) txt = d.type;
+				span.textContent = txt || '-';
+				if (d.random) span.title = _('Random/locally-administered MAC');
+			}, this));
+		}, this));
 	},
 
 	handleCreateStaticLease(lease, ev) {
@@ -373,6 +412,7 @@ return baseclass.extend({
 				E('th', { 'class': 'th' }, _('IPv4 address')),
 				E('th', { 'class': 'th' }, _('IPv6 addresses')),
 				E('th', { 'class': 'th' }, _('MAC address')),
+				E('th', { 'class': 'th' }, _('Vendor')),
 				E('th', { 'class': 'th' }, _('Upload')),
 				E('th', { 'class': 'th' }, _('Download')),
 				E('th', { 'class': 'th', 'data-total-traffic': '1' }, _('Total traffic')),
@@ -389,8 +429,19 @@ return baseclass.extend({
 				host = `${client.hostname} (${hint[1]})`;
 
 			const online = client.macaddr && onlineMACs.has(client.macaddr);
-			const v4 = client.ipaddrs[0] || '-';
 			const v6 = client.ip6addrs.length ? client.ip6addrs.join(' ') : '-';
+			const v4addr = client.ipaddrs[0] || '-';
+			const web = this.webPortFor(client.ipaddrs);
+			let v4 = v4addr;
+			if (web && v4addr != '-') {
+				const scheme = (web.port == 443 || web.port == 8443) ? 'https' : 'http';
+				const showPort = (web.port == 80 || web.port == 443) ? '' : ':' + web.port;
+				v4 = E('a', {
+					'href': scheme + '://' + web.ip + showPort,
+					'target': '_blank', 'rel': 'noopener',
+					'title': _('Open device web UI')
+				}, v4addr);
+			}
 
 			return [
 				E('span', {
@@ -404,6 +455,11 @@ return baseclass.extend({
 				v4,
 				v6,
 				client.macaddr || '-',
+				E('span', {
+					'class': 'luci-client-vendor',
+					'data-mac': client.macaddr || '',
+					'data-hostname': host || ''
+				}, '…'),
 				this.rateCell(client, host_hints, 'upload'),
 				this.rateCell(client, host_hints, 'download'),
 				this.rateCell(client, host_hints, 'total'),

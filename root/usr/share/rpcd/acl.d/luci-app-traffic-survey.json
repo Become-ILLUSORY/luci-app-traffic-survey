@@ -4,6 +4,7 @@
 		"read": {
 			"ubus": {
 				"luci.client-rates": [ "get" ],
+				"traffic-survey-meta": [ "get" ],
 				"luci-rpc": [ "getDHCPLeases" ],
 				"network.rrdns": [ "lookup" ]
 			},
@@ -11,7 +12,9 @@
 				"/proc/net/arp": [ "read" ],
 				"/proc/net/nf_conntrack": [ "read" ],
 				"/proc/sys/net/netfilter/nf_conntrack_acct": [ "read" ],
-				"/tmp/luci-client-rates/*": [ "read" ]
+				"/tmp/dhcp.leases": [ "read" ],
+				"/tmp/luci-client-rates/*": [ "read" ],
+				"/tmp/traffic-survey-vendor/*": [ "read" ]
 			}
 		}
 	}

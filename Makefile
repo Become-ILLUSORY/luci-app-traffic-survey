@@ -43,7 +43,7 @@ define Build/Compile
 		-o $(PKG_BUILD_DIR)/luci.client-rates \
 		./src/client-rates.c \
 		$(TARGET_LDFLAGS) \
-		-lubox -lubus -lblobmsg_json -lmnl -lnetfilter_conntrack -lnfnetlink
+		-lubox -lubus -lblobmsg_json -lmnl -lnetfilter_conntrack -lnfnetlink -lpthread
 endef
 
 define Package/luci-app-traffic-survey/conffiles
@@ -59,6 +59,7 @@ define Package/luci-app-traffic-survey/install
 	$(INSTALL_CONF) ./root/etc/config/traffic_survey $(1)/etc/config/traffic_survey
 	$(INSTALL_DIR) $(1)/usr/libexec/rpcd
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/luci.client-rates $(1)/usr/libexec/rpcd/luci.client-rates
+	$(INSTALL_BIN) ./root/usr/libexec/rpcd/traffic-survey-meta $(1)/usr/libexec/rpcd/traffic-survey-meta
 	$(INSTALL_DIR) $(1)/usr/share/rpcd/acl.d
 	$(INSTALL_DATA) ./root/usr/share/rpcd/acl.d/luci-app-traffic-survey.json $(1)/usr/share/rpcd/acl.d/
 	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d

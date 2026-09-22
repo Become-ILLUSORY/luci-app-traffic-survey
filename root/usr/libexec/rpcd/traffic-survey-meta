@@ -1,0 +1,117 @@
+#!/bin/sh
+# traffic-survey-meta: device metadata backend (vendor + device-type hint)
+#
+# ubus object "traffic-survey.meta":
+#   get {"macs":["aa:bb:cc:dd:ee:ff",...], "hints":{"aa:..:ff":"iPhone-13",...}}
+#     -> { "meta": { "<mac>": {"vendor":"Xiaomi","type":"Phone","random":false}, ... } }
+#
+# vendor: api.macvendors.com by OUI, cached on disk. Locally-administered
+# (randomised) MACs are flagged and not queried.
+# type  : heuristic from DHCP hostname / vendor-class (option 60) hints.
+
+. /usr/share/libubox/jshn.sh
+
+CACHE=/etc/traffic-survey-vendors
+mkdir -p "$CACHE"
+
+norm_mac() { echo "$1" | tr 'A-F' 'a-f'; }
+
+is_random_mac() {
+	# locally-administered bit: second hex digit of first octet is 2/6/a/e
+	local first=$(echo "$1" | cut -d: -f1)
+	local d=$((16#${first:1:1} & 2))
+	[ "$d" -ne 0 ]
+}
+
+vendor_for() {
+	local mac=$(norm_mac "$1")
+	is_random_mac "$mac" && { echo "Random MAC"; return; }
+	local key=$(echo "$mac" | tr -d ':' | cut -c1-6)
+	local cf="$CACHE/$key"
+	if [ -f "$cf" ]; then cat "$cf"; return; fi
+	local v=$(curl -sf --max-time 4 "https://api.macvendors.com/$mac" 2>/dev/null)
+	case "$v" in
+		*errors*|*"not found"*|"") v="Unknown" ;;
+	esac
+	echo "$v" > "$cf"
+	echo "$v"
+}
+
+# crude device-type guess from hostname + option60
+type_for() {
+	local host=$(echo "$1" | tr 'A-Z' 'a-z')
+	local vc=$(echo "$2" | tr 'A-Z' 'a-z')
+	local s="$host $vc"
+	case "$s" in
+		*iphone*|*ipad*|*macbook*|*imac*) echo "Apple" ; return ;;
+		*android*|*redmi*|*huawei*|*honor*|*xiaomi*|*oppo*|*vivo*|*oneplus*) echo "Phone/Android"; return ;;
+		*windows*|*desktop-*|*laptop-*|*-pc) echo "Windows"; return ;;
+		*printer*|*jetdirect*|*epson*|*canon*) echo "Printer"; return ;;
+		*cam*|*ipc*|*nvr*|*dvr*) echo "Camera"; return ;;
+		*tv*|*roku*|*chromecast*|*appletv*|*mi-box*) echo "TV/Media"; return ;;
+		*router*|*ap-*|*openwrt*|*nas*|*synology*|*qnap*) echo "Network"; return ;;
+		*esp32*|*esp8266*|*tasmota*|*shelly*|*iot*) echo "IoT"; return ;;
+		*ubuntu*|*debian*|*raspberry*|*rpi*|*linux*) echo "Linux"; return ;;
+	esac
+	echo ""
+}
+
+list_cb() {
+	json_init
+	json_add_object list
+	json_add_string get ""
+	json_close_object
+	json_dump
+}
+
+do_get() {
+	local MACS HINTS
+	json_init
+	json_load "$1"
+	json_get_var MACS macs 2>/dev/null
+
+	json_init
+	json_add_object meta
+
+	# optional hostname hints {mac:hostname}
+	local H
+	json_load "$1"
+	json_select hints 2>/dev/null && {
+		local keys=$(json_get_keys 2>/dev/null)
+		for k in $keys; do
+			json_get_var H "$k" 2>/dev/null
+			eval "HINT_$(echo $k | tr -d ':')=\"$H\""
+		done
+		json_select ..
+	}
+
+	# macs array
+	json_select macs 2>/dev/null && {
+		local i=1
+		while json_get_var M $i 2>/dev/null; do
+			local mac=$(norm_mac "$M")
+			local vend=$(vendor_for "$mac")
+			local rand=false
+			is_random_mac "$mac" && rand=true
+			local hn; eval "hn=\"\$HINT_$(echo $mac | tr -d ':')\""
+			local typ=$(type_for "$hn" "")
+			json_add_object "$mac"
+			json_add_string vendor "$vend"
+			json_add_string type "$typ"
+			json_add_boolean random $([ "$rand" = true ] && echo 1 || echo 0)
+			json_close_object
+			i=$((i+1))
+		done
+		json_select ..
+	}
+
+	json_close_object
+	json_dump
+}
+
+case "$1" in
+	list) list_cb ;;
+	call)
+		[ "$2" = get ] && { do_get "$(cat)"; exit 0; }
+		;;
+esac

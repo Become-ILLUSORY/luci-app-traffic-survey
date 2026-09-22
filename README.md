@@ -5,6 +5,40 @@
 在 **状态 → 概览** 里替换默认的「在线主机」面板，新增每台主机的
 **上传速率 / 下载速率 / 总流量** 三列，每 2 秒刷新。
 
+## 最低要求
+
+| 类别 | 要求 | 说明 |
+|---|---|---|
+| **固件基线** | OpenWrt / ImmortalWrt，内核 ≥ 5.4（推荐 6.x） | 依赖 netfilter conntrack accounting 与 ctnetlink |
+| **包管理器** | APK（ImmortalWrt ≥ 25.x）或 OPKG（OpenWrt ≤ 24.x） | CI 按目标分支产出对应格式 |
+| **Web 界面** | LuCI（JS 版，`luci-base`） | 前端是 LuCI `status/include` 面板 |
+| **RPC 层** | `rpcd` + `ubusd` | 后端是 rpcd/ubus 插件 |
+| **运行时依赖** | `libubox` `libubus` `libmnl` `libnetfilter-conntrack` `libnfnetlink` | 安装时自动拉取 |
+| **内核配置** | `CONFIG_NF_CONNTRACK=y`、`CONFIG_NF_CT_ACCT`（或运行时可开 `nf_conntrack_acct`） | 缺了会显示"统计不可用" |
+| **内存** | ≥ 128 MB | 守护进程常驻内存仅数百 KB |
+
+## 适用条件（什么情况能用 / 能用但有限制 / 不能用）
+
+### ✅ 完全可用（统计精确）
+
+- **MediaTek MT7981 / MT7986 / MT7988**（filogic，`mtk-hnat_v4/v5`，`per_flow_accounting=true`），开了硬件 NAT 加速——PPE 硬计数器回灌，硬转流量照样逐主机统计。**这是本包的主打场景**，典型机型：CMCC RAX3000M-NAND 等。
+- 任何**纯软转发 / 软 flow offload** 的 OpenWrt/ImmortalWrt（x86、MT7622、IPQ 等）——包全过 CPU，conntrack 计数天然完整。
+- 完全**关闭**任何 offload 的设备。
+
+### ⚠️ 能用但有限制
+
+- **非联发科的硬件 offload**（如高通 NSS、博通 FA/CTF）：本包只实现了 MTK 的计数回灌。这些平台上开了硬转后，被卸载的流 conntrack 计数停更 → **速率显示偏低或 0，总量偏小**（和未感知 offloading 的传统统计一样的毛病）。关掉硬转即恢复精确。
+- **MTK 但较老的 SoC**（`per_flow_accounting=false`，如部分 MT7621/7622 PPE）：无 per-entry 硬计数，硬转下统计不准；软转正常。
+- **大流量冲击瞬间**：回灌有周期（秒级），速率比瞬时真实值略"钝"，但总量分毫不差。
+
+### ❌ 不可用
+
+- **非 LuCI 界面**（如纯 CLI、其它 Web 框架）——前端是 LuCI 面板。
+- **内核未启用 conntrack**（极简容器/定制内核）。
+- **无 rpcd/ubus** 的系统。
+
+> 一句话：**联发科 MT798x + 开硬转 = 本包存在的意义**；其它软转平台也能用，但那是顺带兼容。
+
 ## 原理
 
 统计数据全部来自 **conntrack accounting**（`/proc/net/nf_conntrack` 里每条流的
@@ -23,8 +57,8 @@
 
 | 文件 | 作用 |
 |---|---|
-| `usr/libexec/rpcd/luci.client-rates` | rpcd exec 插件，ubus 对象 `luci.client-rates`（兼容 QWRT API）；内含采样守护 |
-| `etc/init.d/traffic-survey` | 开机开 `nf_conntrack_acct` + HNAT 回灌，procd 拉起采样循环 |
+| `src/client-rates.c` → `usr/libexec/rpcd/luci.client-rates` | **C 后端**：常驻 ubus 守护，ubus 对象 `luci.client-rates`，libmnl + libnetfilter_conntrack 做 ctnetlink dump，uloop 定时 2s 采样，per-MAC 总量持久化到 `/tmp` |
+| `etc/init.d/traffic-survey` | 开机开 `nf_conntrack_acct` + HNAT 回灌（`echo 7 1 > hnat_setting`），procd 拉起并守护 C 守护进程 |
 | `htdocs/.../status/include/40_dhcp.js` | 概览页「在线主机」面板（上传/下载/总流量列，2s 轮询） |
 | `usr/share/rpcd/acl.d/...json` | ACL 授权 |
 | `po/zh_Hans/` | 中文翻译 |
@@ -62,9 +96,3 @@ logread | grep traffic-survey             # 应有 "enabled HNAT counter feedbac
 grep <某主机IP> /proc/net/nf_conntrack | head -1   # bytes= 应持续增长
 ubus call luci.client-rates get '{"addresses":["192.168.0.10"]}'
 ```
-
-## 与 QWRT 版的关系
-
-QWRT 是 lean 的闭源固件，其统计后端 `rpcd/luci.so` 不开源。本包用纯 shell + awk
-重新实现了等价的 `luci.client-rates` ubus API（协议字段逐一对齐），并复刻了概览页
-前端。去掉了 QWRT 专属的 OUI 厂商库、指纹识别、Web 端口探测，保持零额外依赖。
