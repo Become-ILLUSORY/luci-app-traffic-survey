@@ -5,17 +5,33 @@
 在 **状态 → 概览** 里替换默认的「在线主机」面板，新增每台主机的
 **上传速率 / 下载速率 / 总流量** 三列，每 2 秒刷新。
 
-## 最低要求
+## 最低要求（不满足则无法使用）
 
-| 类别 | 要求 | 说明 |
+这些是**硬性前置条件**，缺任何一条都会导致功能不可用或部分不可用：
+
+| 类别 | 必须满足 | 不满足的后果 |
 |---|---|---|
-| **固件基线** | OpenWrt / ImmortalWrt，内核 ≥ 5.4（推荐 6.x） | 依赖 netfilter conntrack accounting 与 ctnetlink |
-| **包管理器** | APK（ImmortalWrt ≥ 25.x）或 OPKG（OpenWrt ≤ 24.x） | CI 按目标分支产出对应格式 |
-| **Web 界面** | LuCI（JS 版，`luci-base`） | 前端是 LuCI `status/include` 面板 |
-| **RPC 层** | `rpcd` + `ubusd` | 后端是 rpcd/ubus 插件 |
-| **运行时依赖** | `libubox` `libubus` `libmnl` `libnetfilter-conntrack` `libnfnetlink` | 安装时自动拉取 |
-| **内核配置** | `CONFIG_NF_CONNTRACK=y`、`CONFIG_NF_CT_ACCT`（或运行时可开 `nf_conntrack_acct`） | 缺了会显示"统计不可用" |
-| **内存** | ≥ 128 MB | 守护进程常驻内存仅数百 KB |
+| **固件** | OpenWrt 或 ImmortalWrt | 非此系固件无 LuCI/rpcd/ubus，整套机制不成立 |
+| **内核** | ≥ 5.4（推荐 6.x），`CONFIG_NF_CONNTRACK=y` | 无 conntrack → 统计完全不可用 |
+| **conntrack 记账** | `CONFIG_NF_CT_ACCT=y`，或运行时可开 `net.netfilter.nf_conntrack_acct=1` | 无法开启 → 速率/总量恒为 0，前端显示"统计不可用" |
+| **RPC/UBus** | `rpcd` 运行中 + `ubusd` 运行中 | 后端插件无法注册，前端拿不到数据 |
+| **Web 界面** | LuCI（JS 版 `luci-base`） | 前端是 LuCI `status/include` 面板，非 LuCI 界面看不到 |
+| **运行时依赖** | `libubox` `libubus` `libmnl` `libnetfilter-conntrack` `libnfnetlink` | 安装时自动拉取；被裁剪掉则后端无法启动 |
+| **包管理器** | APK（ImmortalWrt ≥ 25.x）或 OPKG（OpenWrt ≤ 24.x） | 用对应格式的包安装 |
+| **内存** | ≥ 128 MB | 守护常驻内存仅数百 KB，极低端设备需留意 |
+
+> **验证最低要求**：`sysctl net.netfilter.nf_conntrack_acct`（应为 1）、`ubus list`（应有响应）、`test -c /dev/netlink 或内核支持 ctnetlink`。
+
+## 功能与额外条件
+
+三个增强功能各自有独立条件，**不影响核心流量统计**；不满足时对应功能静默降级：
+
+| 功能 | 额外条件 | 不满足时 |
+|---|---|---|
+| **逐主机流量统计**（核心） | 见上表"最低要求"；MTK 硬转下需 HNAT 支持 per-flow accounting（见下节） | 速率为 `-`/0 |
+| **厂商识别（Vendor）** | 能访问外网 `api.macvendors.com`（仅首次查询某 MAC 时需要，结果缓存到本地） | 该列显示 `-`，其余功能不受影响；随机 MAC 本就不查 |
+| **设备类型** | dnsmasq 租约里带有可识别的 hostname / vendor-class | 显示 `-`（纯启发式，无指纹库，不保证识别率） |
+| **Web 管理页直达** | 目标设备确实开放了受支持的 Web 端口（80/443/8080/8443/81/8000/5000/9000/5666/5667 之一） | IP 保持纯文本不可点；探测本身零开销、可忽略 |
 
 ## 适用条件（什么情况能用 / 能用但有限制 / 不能用）
 
@@ -57,9 +73,10 @@
 
 | 文件 | 作用 |
 |---|---|
-| `src/client-rates.c` → `usr/libexec/rpcd/luci.client-rates` | **C 后端**：常驻 ubus 守护，ubus 对象 `luci.client-rates`，libmnl + libnetfilter_conntrack 做 ctnetlink dump，uloop 定时 2s 采样，per-MAC 总量持久化到 `/tmp` |
+| `src/client-rates.c` → `usr/libexec/rpcd/luci.client-rates` | **C 后端**：常驻 ubus 守护，ubus 对象 `luci.client-rates`；libmnl + libnetfilter_conntrack 做 ctnetlink dump，uloop 定时 2s 采样，per-MAC 总量持久化到 `/tmp`；内嵌 **Web 端口探测线程**（非阻塞扫常见管理端口，结果经 `web_port` 字段返回） |
+| `root/usr/libexec/rpcd/traffic-survey-meta` | **设备元信息后端**（shell ubus 插件 `traffic-survey-meta`）：OUI 厂商查询（api.macvendors.com，结果缓存到 `/tmp/traffic-survey-vendor/`，随机 MAC 跳过）+ 设备类型启发式（解析 dnsmasq 租约的 hostname/vendor-class，不抓包） |
 | `etc/init.d/traffic-survey` | 开机开 `nf_conntrack_acct` + HNAT 回灌（`echo 7 1 > hnat_setting`），procd 拉起并守护 C 守护进程 |
-| `htdocs/.../status/include/40_dhcp.js` | 概览页「在线主机」面板（上传/下载/总流量列，2s 轮询） |
+| `htdocs/.../status/include/40_dhcp.js` | 概览页「在线主机」面板：上传/下载/总流量列（2s 轮询）、**厂商列**（懒加载不阻塞）、**可点 IP**（直达设备 Web 后台） |
 | `usr/share/rpcd/acl.d/...json` | ACL 授权 |
 | `po/zh_Hans/` | 中文翻译 |
 
@@ -78,12 +95,20 @@ make package/luci-app-traffic-survey/compile V=s
 # 产物: bin/packages/*/base/luci-app-traffic-survey_*_all.apk
 ```
 
-`.apk` 是 `PKGARCH=all`，直接 `apk add --allow-untrusted` 到运行中的路由器即可，不必重刷固件。
+包内有 C 二进制（aarch64），是架构相关包；同名 SoC 家族的固件可直接
+`apk add --allow-untrusted` 到运行中的路由器，不必重刷。
+
+### 用 GitHub Actions 编译（推荐，已内置）
+
+仓库自带 `.github/workflows/build.yml`：push 即触发，自动拉
+ImmortalWrt 25.12.2 mediatek/filogic SDK（aarch64_cortex-a53）编译，
+产物（.apk）上传到 Artifacts；打 tag 会同时挂到 Release。无需本地工具链。
 
 ## 安装后
 
 ```sh
-apk add --allow-untrusted luci-app-traffic-survey_1.0.0-1_all.apk
+apk add --allow-untrusted luci-app-traffic-survey-1.0.0-r1.apk
+/etc/init.d/traffic-survey start
 # 浏览器: 状态 -> 概览 -> 在线主机  (强制刷新一次页面清 LuCI 缓存)
 ```
 
