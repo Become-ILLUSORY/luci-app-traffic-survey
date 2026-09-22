@@ -69,22 +69,28 @@ jobs:
           cd /tmp/sdk
           make package/luci-app-traffic-survey/compile V=s -j"$(nproc)"
 
-      - name: Collect ipk
+      - name: Collect package artifact
         run: |
           cd /tmp/sdk
           mkdir -p "$GITHUB_WORKSPACE/dist"
-          find bin/packages -name 'luci-app-traffic-survey*.ipk' -exec cp -v {} "$GITHUB_WORKSPACE/dist/" \;
+          # ImmortalWrt 25.x uses APK; older branches use OPKG (.ipk). Grab either.
+          find bin/packages -name 'luci-app-traffic-survey*.apk' -o -name 'luci-app-traffic-survey*.ipk' \
+            | xargs -r cp -v -t "$GITHUB_WORKSPACE/dist/"
           ls -la "$GITHUB_WORKSPACE/dist"
 
-      - name: Upload ipk artifact
+      - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: luci-app-traffic-survey-ipk
-          path: dist/*.ipk
+          name: luci-app-traffic-survey
+          path: |
+            dist/*.apk
+            dist/*.ipk
           if-no-files-found: error
 
       - name: Attach to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.ipk
+          files: |
+            dist/*.apk
+            dist/*.ipk

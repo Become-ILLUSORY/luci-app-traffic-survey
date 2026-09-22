@@ -41,15 +41,15 @@ make menuconfig   # LuCI -> Applications -> luci-app-traffic-survey -> <M>
 
 # 3) 编译
 make package/luci-app-traffic-survey/compile V=s
-# 产物: bin/packages/*/base/luci-app-traffic-survey_*_all.ipk
+# 产物: bin/packages/*/base/luci-app-traffic-survey_*_all.apk
 ```
 
-`.ipk` 是 `PKGARCH=all`，直接 `opkg install` 到运行中的路由器即可，不必重刷固件。
+`.apk` 是 `PKGARCH=all`，直接 `apk add --allow-untrusted` 到运行中的路由器即可，不必重刷固件。
 
 ## 安装后
 
 ```sh
-opkg install luci-app-traffic-survey_1.0.0-1_all.ipk
+apk add --allow-untrusted luci-app-traffic-survey_1.0.0-1_all.apk
 # 浏览器: 状态 -> 概览 -> 在线主机  (强制刷新一次页面清 LuCI 缓存)
 ```
 
